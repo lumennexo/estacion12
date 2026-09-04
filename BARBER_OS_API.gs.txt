@@ -1,0 +1,1401 @@
+/****************************************************
+ * BARBER OS LITE — SCRIPT MAESTRO
+ * Versión 4.0 — Panel del barbero (app de una sola página)
+ *
+ * NOVEDADES v4.0:
+ *  - La página principal es un PANEL: agenda del día con
+ *    ingreso estimado, barbero por cita y botones Confirmar/Cancelar.
+ *  - Agendar dentro del panel: cliente EXISTENTE (autollenado) o NUEVO.
+ *    Cada cita guarda hora de inicio y fin (según el servicio).
+ *  - Hoja BARBEROS dinámica: agrega un renglón por cada barbero.
+ *  - Se quitó Google Calendar (el panel es la agenda).
+ *  - El agradecimiento se envía solo, 1 hora después de completar.
+ *  - Acceso con casilla de PIN (el barbero escribe su código).
+ *
+ * INSTALACIÓN:
+ *  1. Google Sheets → Extensiones → Apps Script
+ *  2. Borra todo y pega este script. Guarda (Ctrl+S).
+ *  3. Recarga el Sheets → menú ✂️ BARBER OS Lite → 🚀 Instalar sistema
+ *  4. Publica: Implementar → Nueva implementación → Aplicación web
+ *     (Ejecutar como: Yo · Acceso: Cualquier persona) → Implementar.
+ *  5. Menú → 📋 Ver link — Panel. Compártelo y da el PIN aparte.
+ *
+ * NOTA: si editas el código, crea una NUEVA versión de la
+ * implementación (Administrar implementaciones → editar → Nueva versión).
+ ****************************************************/
+
+/************ CONFIGURACIÓN GENERAL ************/
+
+const HOJAS = {
+  CONFIG:    "CONFIG",
+  CLIENTES:  "CLIENTES",
+  CITAS:     "CITAS",
+  SERVICIOS: "SERVICIOS",
+  BARBEROS:  "BARBEROS",
+  MENSAJES:  "MENSAJES",
+  LOG:       "LOG"
+};
+
+const ORDEN_VARIABLES_WA = {
+  CONFIRMACION_CITA:     ["NOMBRE", "FECHA", "HORA", "SERVICIO", "TELEFONO"],
+  RECORDATORIO_2_DIAS:   ["NOMBRE", "FECHA", "HORA", "TELEFONO"],
+  RECORDATORIO_DIA_CITA: ["NOMBRE", "HORA", "TELEFONO"],
+  AGRADECIMIENTO:        ["NOMBRE", "TELEFONO"],
+  YA_TOCA_CORTE:         ["NOMBRE", "TELEFONO"]
+};
+
+/************ MENÚ ************/
+
+function onOpen() {
+  const estado = sistemaActivo_() ? "🟢 Activo" : "⏸️ Pausado";
+  SpreadsheetApp.getUi()
+    .createMenu("✂️ BARBER OS Lite")
+    .addItem("🚀 Instalar sistema",                "instalarBarberOSLite")
+    .addItem("🔄 Reinstalar configuración",        "reinstalarBarberOSLite")
+    .addSeparator()
+    .addItem("📋 Ver link — Panel del barbero",    "mostrarLinkPanel")
+    .addSeparator()
+    .addItem(`⏯️ Pausar / Reanudar  (${estado})`,  "alternarPausaSistema")
+    .addSeparator()
+    .addItem("⚙️ Procesar citas pendientes",       "procesarCitasPendientes")
+    .addItem("📅 Enviar resumen al barbero",        "enviarResumenDiarioBarbero")
+    .addItem("📨 Enviar recordatorios",             "enviarRecordatorios")
+    .addItem("🙏 Enviar agradecimientos pendientes","enviarAgradecimientosPendientes")
+    .addItem("✂️ Enviar 'Ya te toca corte'",       "enviarYaTocaCorte")
+    .addSeparator()
+    .addItem("🧪 Probar envío de WhatsApp (Twilio)","probarWhatsAppTwilio")
+    .addItem("🩺 Diagnóstico del sistema",          "mostrarDiagnostico")
+    .addItem("📄 Ver LOG",                          "abrirLog")
+    .addToUi();
+}
+
+/************ INSTALADOR ************/
+
+function instalarBarberOSLite() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  crearHojaConfig_(ss, false);
+  crearHojaClientes_(ss, false);
+  crearHojaCitas_(ss, false);
+  crearHojaServicios_(ss, false);
+  crearHojaBarberos_(ss, false);
+  crearHojaMensajes_(ss, false);
+  crearHojaLog_(ss, false);
+
+  migrarEsquema_();   // agrega columnas nuevas a CITAS si vienes de una versión anterior
+
+  const cfgActual = cargarConfig_();
+  if (!String(cfgActual["PIN_ACCESO"] || "").trim()) {
+    guardarEnConfig_(ss, "PIN_ACCESO", generarPin_());
+  }
+
+  crearTriggersBarberOS_();
+
+  const tz = Session.getScriptTimeZone();
+  const bloqueTz = (tz === "America/Mexico_City") ? "" :
+    `⚠️ Zona horaria del proyecto: ${tz}\nCámbiala a America/Mexico_City en Configuración del proyecto.\n\n`;
+
+  const url = urlWebApp_();
+  const bloqueUrl = url
+    ? "Tus páginas ya están publicadas. Menú 📋 'Ver link — Panel' te da el enlace (incluye el PIN).\n\n"
+    : "IMPORTANTE — Publica la Web App:\nImplementar → Nueva implementación → Aplicación web\n(Ejecutar como: Yo · Acceso: Cualquier persona)\n\n";
+
+  ui.alert("✅ BARBER OS Lite v4.0 instalado",
+    "Sistema listo.\n\n" + bloqueTz + bloqueUrl +
+    "Llena CONFIG (nombre, teléfono, logo), agrega tus barberos en la hoja BARBEROS " +
+    "y tus servicios/precios en SERVICIOS.",
+    ui.ButtonSet.OK);
+}
+
+function reinstalarBarberOSLite() {
+  const ui = SpreadsheetApp.getUi();
+  const r  = ui.alert("⚠️ ADVERTENCIA",
+    "Reinstalará CONFIG, SERVICIOS, BARBEROS y MENSAJES.\nCLIENTES, CITAS y LOG no se tocan.\n\n¿Continuar?",
+    ui.ButtonSet.YES_NO);
+  if (r !== ui.Button.YES) return;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  crearHojaConfig_(ss, true);
+  crearHojaServicios_(ss, true);
+  crearHojaBarberos_(ss, true);
+  crearHojaMensajes_(ss, true);
+  migrarEsquema_();
+  crearTriggersBarberOS_();
+  ui.alert("✅ Configuración reinstalada.");
+}
+
+/************ LINK DEL PANEL ************/
+
+function urlWebApp_() {
+  try { return ScriptApp.getService().getUrl() || ""; } catch (e) { return ""; }
+}
+
+function generarPin_() {
+  return Utilities.getUuid().replace(/-/g, "").substring(0, 8);
+}
+
+function linkConParametros_(page) {
+  const url = urlWebApp_();
+  if (!url) return "";
+  let link = url + "?page=" + page;
+  const pin = String(cargarConfig_()["PIN_ACCESO"] || "").trim();
+  if (pin) link += "&key=" + encodeURIComponent(pin);
+  return link;
+}
+
+function mostrarLinkPanel() {
+  const ui   = SpreadsheetApp.getUi();
+  const link = linkConParametros_("panel");
+  const pin  = String(cargarConfig_()["PIN_ACCESO"] || "").trim();
+  if (!link) {
+    ui.alert("⚠️ Falta publicar la Web App",
+      "Apps Script → Implementar → Nueva implementación → Aplicación web\n(Ejecutar como: Yo · Acceso: Cualquier persona).",
+      ui.ButtonSet.OK);
+    return;
+  }
+  ui.alert("📋 Link — Panel del barbero",
+    "Enlace directo (ya trae el PIN):\n\n" + link +
+    "\n\nO comparte el link sin el código y da el PIN aparte:\nPIN de acceso: " + (pin || "(sin PIN)"),
+    ui.ButtonSet.OK);
+}
+
+function mostrarDiagnostico() {
+  const ui  = SpreadsheetApp.getUi();
+  const cfg = cargarConfig_();
+  const tz  = Session.getScriptTimeZone();
+  const url = urlWebApp_();
+  const pin = String(cfg["PIN_ACCESO"] || "").trim();
+  const msg =
+    "Zona horaria: " + tz + (tz === "America/Mexico_City" ? "  ✔" : "  ⚠ usa America/Mexico_City") + "\n" +
+    "Sistema: " + (sistemaActivo_(cfg) ? "🟢 Activo" : "⏸️ Pausado") + "\n" +
+    "WhatsApp: " + (esSi_(cfg["WHATSAPP_ACTIVO"]) ? "SÍ" : "NO") + "   ·   Email: " + (esSi_(cfg["EMAIL_ACTIVO"]) ? "SÍ" : "NO") + "\n" +
+    "PIN de acceso: " + (pin ? "activo ✔" : "sin PIN ⚠") + "\n" +
+    "Web App publicada: " + (url ? "sí ✔" : "NO ⚠") + "\n" +
+    "Barberos activos: " + getBarberos_().length + "\n\n" +
+    "Twilio SID: " + (String(cfg["TWILIO_ACCOUNT_SID"] || "").trim() ? "configurado ✔" : "falta ⚠") + "\n" +
+    "Twilio From: " + (String(cfg["TWILIO_WHATSAPP_FROM"] || "").trim() ? "configurado ✔" : "falta ⚠");
+  ui.alert("🩺 Diagnóstico BARBER OS", msg, ui.ButtonSet.OK);
+}
+
+/************ WEB APP — RUTEO ************/
+
+function doGet(e) {
+  const params = (e && e.parameter) || {};
+
+  // ===== API JSON para el front alojado en GitHub Pages =====
+  if (params.action) return apiJson_(params);
+
+  const config = cargarConfig_();
+  const titulo = (config["NOMBRE_BARBERIA"] || "Barber Studio");
+
+  const pin = String(config["PIN_ACCESO"] || "").trim();
+  if (pin && String(params.key || "") !== pin) {
+    const intentoFallido = String(params.key || "") !== "";
+    return HtmlService.createHtmlOutput(htmlAccesoRestringido_(config, "panel", intentoFallido))
+      .setTitle(titulo + " — Acceso")
+      .addMetaTag("viewport", "width=device-width, initial-scale=1")
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  }
+
+  return HtmlService.createHtmlOutput(htmlApp_(config))
+    .setTitle(titulo + " — Panel")
+    .addMetaTag("viewport", "width=device-width, initial-scale=1")
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/************ API JSON (para el front de GitHub Pages) ************/
+
+function apiJson_(p) {
+  const salida = function (obj) {
+    return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+  };
+  try {
+    const config = cargarConfig_();
+    const pin = String(config["PIN_ACCESO"] || "").trim();
+    const accion = String(p.action || "");
+
+    // 'ping' es público (sin llave) para traer la marca antes de entrar
+    if (accion === "ping") {
+      return salida({ ok: true, barberia: config["NOMBRE_BARBERIA"] || "Barber Studio",
+        acento: config["COLOR_ACENTO"] || "#1A1A1A", logo: config["LOGO_URL"] || "" });
+    }
+
+    // El resto exige la llave
+    if (pin && String(p.key || "") !== pin) return salida({ ok: false, error: "auth" });
+
+    switch (accion) {
+      case "listas":    return salida({ ok: true, data: appListas() });
+      case "dia":       return salida({ ok: true, data: appCargarDia(String(p.fecha || "")) });
+      case "confirmar": return salida(appConfirmar(String(p.id || ""), String(p.accion || "")));
+      case "agendar":   return salida(appAgendar({
+        modo: p.modo, nombre: p.nombre, telefono: p.telefono, email: p.email,
+        barbero: p.barbero, servicio: p.servicio, fecha: p.fecha, horaIni: p.horaIni
+      }));
+      default: return salida({ ok: false, error: "accion_desconocida" });
+    }
+  } catch (err) {
+    return salida({ ok: false, error: String(err && err.message || err) });
+  }
+}
+
+/************ WEB APP — CABECERA / ESTILOS COMUNES ************/
+
+function cabeceraWeb_(config, subtitulo) {
+  const nombre = escaparHtml_(config["NOMBRE_BARBERIA"] || "Barber Studio");
+  const logo   = String(config["LOGO_URL"] || "").trim();
+  const logoHtml = logo
+    ? `<img src="${escaparHtml_(logo)}" alt="${nombre}" style="max-height:80px;max-width:220px;margin:0 auto 6px;display:block;"/>`
+    : `<div style="font-size:34px;line-height:1;margin-bottom:6px;">✂️</div><div class="brand">${nombre}</div>`;
+  return `<div class="head">${logoHtml}<div class="tag">${escaparHtml_(subtitulo)}</div></div>`;
+}
+
+function estilosWeb_(config) {
+  const acento = escaparHtml_(config["COLOR_ACENTO"] || "#1A1A1A");
+  return `<style>
+    *{box-sizing:border-box;}
+    body{margin:0;background:#f4f4f5;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#1a1a1a;padding:22px 12px;}
+    .card{max-width:460px;margin:0 auto;background:#fff;border:1px solid #e6e6e6;border-radius:18px;overflow:hidden;box-shadow:0 10px 34px rgba(0,0,0,.08);}
+    .head{background:#fff;padding:22px 22px 16px;text-align:center;border-bottom:1px solid #ededed;position:relative;}
+    .brand{font-size:18px;font-weight:800;color:#111;letter-spacing:.5px;}
+    .tag{font-size:10px;color:${acento};letter-spacing:3px;text-transform:uppercase;margin-top:5px;}
+    .body{padding:18px 18px 24px;}
+    label{display:block;font-size:11px;color:#8a8a8a;text-transform:uppercase;letter-spacing:1px;margin:14px 0 6px;}
+    input,select,textarea{width:100%;padding:12px 13px;background:#fafafa;border:1px solid #ddd;border-radius:10px;color:#111;font-size:15px;}
+    input:focus,select:focus,textarea:focus{outline:none;border-color:${acento};background:#fff;}
+    textarea{min-height:60px;resize:vertical;}
+    .btnmain{display:block;width:100%;padding:14px;background:${acento};color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer;}
+    .btnmain:disabled{opacity:.5;}
+    .msg{margin-top:16px;padding:13px;border-radius:10px;font-size:14px;display:none;}
+    .msg.ok{background:#eafbef;border:1px solid #bfe8cc;color:#1c7a3d;display:block;}
+    .msg.err{background:#fdecec;border:1px solid #f3b6b6;color:#b13232;display:block;}
+    .foot{text-align:center;font-size:10px;color:#bbb;padding:14px;border-top:1px solid #ededed;}
+    .back{position:absolute;left:16px;top:20px;font-size:22px;cursor:pointer;color:#444;background:none;border:none;}
+    /* panel */
+    .datenav{display:flex;align-items:center;justify-content:space-between;background:#fafafa;border:1px solid #e6e6e6;border-radius:12px;padding:9px 10px;margin-bottom:12px;}
+    .datenav .d{font-size:14px;font-weight:700;text-transform:capitalize;}
+    .arrow{width:34px;height:34px;border-radius:9px;border:1px solid #e6e6e6;background:#fff;font-size:16px;cursor:pointer;color:#444;}
+    .stats{display:flex;gap:8px;margin-bottom:14px;}
+    .stat{flex:1;background:#fafafa;border:1px solid #e6e6e6;border-radius:12px;padding:9px;text-align:center;}
+    .stat b{display:block;font-size:19px;color:${acento};}
+    .stat span{font-size:10px;color:#8a8a8a;text-transform:uppercase;letter-spacing:1px;}
+    .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
+    .chip{font-size:12px;padding:6px 12px;border-radius:20px;border:1px solid #e6e6e6;background:#fff;color:#555;cursor:pointer;}
+    .chip.on{background:${acento};color:#fff;border-color:${acento};}
+    .seclbl{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#8a8a8a;margin:6px 2px 10px;}
+    .appt{display:flex;gap:11px;border:1px solid #e6e6e6;border-radius:14px;padding:11px;margin-bottom:10px;background:#fff;}
+    .appt .time{flex:0 0 60px;text-align:center;border-right:1px solid #e6e6e6;padding-right:9px;}
+    .appt .time .s{font-size:16px;font-weight:800;}
+    .appt .time .e{font-size:10px;color:#8a8a8a;margin-top:2px;}
+    .appt .info{flex:1;min-width:0;}
+    .appt .nm{font-size:15px;font-weight:700;}
+    .appt .sv{font-size:12px;color:#555;margin-top:2px;}
+    .appt .ph{font-size:11px;color:#8a8a8a;margin-top:3px;}
+    .appt .act{flex:0 0 auto;display:flex;align-items:center;}
+    .acts{display:flex;flex-direction:column;gap:6px;}
+    .conf{border:1px solid ${acento};background:#fff;color:#7a6a2a;border-radius:20px;padding:8px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;}
+    .xbtn{border:1px solid #e2c9c9;background:#fff;color:#a15656;border-radius:20px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;}
+    .cancd{border:1px solid #ddd;background:#f0f0f0;color:#999;border-radius:20px;padding:8px 12px;font-size:12px;font-weight:700;white-space:nowrap;}
+    .appt.done{background:#eafbef;border-color:#bfe8cc;}
+    .appt.done .conf{background:#1c7a3d;border-color:#1c7a3d;color:#fff;cursor:default;}
+    .appt.done .nm{color:#256b3b;}
+    .appt.canc{opacity:.55;}
+    .appt.canc .nm{text-decoration:line-through;color:#999;}
+    .empty{text-align:center;color:#999;font-size:14px;padding:26px 10px;background:#fafafa;border:1px dashed #ddd;border-radius:12px;}
+    .seg{display:flex;gap:8px;background:#fafafa;border:1px solid #e6e6e6;border-radius:12px;padding:5px;}
+    .seg button{flex:1;padding:10px;border:none;background:transparent;border-radius:9px;font-size:14px;font-weight:700;color:#666;cursor:pointer;}
+    .seg button.on{background:${acento};color:#fff;}
+    .two{display:flex;gap:10px;} .two>div{flex:1;}
+    .endnote{margin-top:8px;font-size:13px;color:#555;background:#f7f7f8;border:1px solid #e6e6e6;border-left:3px solid ${acento};border-radius:10px;padding:10px 12px;}
+    .hide{display:none;}
+    .lockbadge{font-size:9px;color:${acento};background:#f3eede;border:1px solid #e6dcbf;border-radius:5px;padding:1px 6px;margin-left:6px;}
+  </style>`;
+}
+
+function htmlAccesoRestringido_(config, page, intentoFallido) {
+  const base   = urlWebApp_();
+  const nombre = escaparHtml_(config["NOMBRE_BARBERIA"] || "BARBER OS");
+  const logo   = String(config["LOGO_URL"] || "").trim();
+  const logoHtml = logo
+    ? `<img src="${escaparHtml_(logo)}" alt="${nombre}" style="width:112px;height:112px;border-radius:26px;object-fit:cover;display:block;margin:0 auto 22px;"/>`
+    : `<div style="width:112px;height:112px;border-radius:26px;background:#0e3a2c;display:flex;align-items:center;justify-content:center;font-size:52px;margin:0 auto 22px;">✂️</div>`;
+  const errHtml = intentoFallido
+    ? `<div id="err" style="margin-top:16px;font-size:14px;color:#f4b0a8;">Llave incorrecta. Inténtalo de nuevo.</div>` : "";
+
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+  <style>
+    *{box-sizing:border-box;}
+    body{margin:0;min-height:100vh;background:radial-gradient(120% 90% at 50% 22%, #164733 0%, #0f3626 55%, #0a2b1e 100%);
+      font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#eaf2ec;display:flex;align-items:center;justify-content:center;padding:30px 22px;}
+    .wrap{width:100%;max-width:380px;text-align:center;}
+    h1{margin:0 0 14px;font-size:30px;font-weight:800;letter-spacing:.5px;color:#fff;}
+    p.sub{margin:0 auto 26px;font-size:15px;line-height:1.5;color:#a9c2b4;max-width:320px;}
+    p.sub b{color:#eaf2ec;}
+    input{width:100%;padding:15px 16px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.16);border-radius:12px;color:#fff;font-size:16px;text-align:center;}
+    input::placeholder{color:#7f9a8c;} input:focus{outline:none;border-color:#2fae7c;background:rgba(255,255,255,.09);}
+    a.btn{display:block;margin-top:14px;padding:15px;background:#1f9d6b;color:#fff;border-radius:12px;font-size:17px;font-weight:700;text-decoration:none;cursor:pointer;}
+    a.btn:active{opacity:.9;}
+    p.note{margin:26px auto 0;font-size:13px;line-height:1.5;color:#7f9a8c;max-width:300px;}
+  </style></head>
+  <body>
+    <div class="wrap">
+      ${logoHtml}
+      <h1>${nombre}</h1>
+      <p class="sub">Pega aquí tu <b>llave de acceso</b> (te la compartieron por correo o mensaje).</p>
+      <input id="pin" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="tu llave…">
+      <a id="go" class="btn" target="_top" href="#">Entrar</a>
+      ${errHtml}
+      <p class="note">Solo la primera vez. Después ${nombre} recuerda tu llave y entra directo.</p>
+    </div>
+    <script>
+      var base=${JSON.stringify(base)}, intento=${intentoFallido ? "true" : "false"}, LS='barberos_key';
+      var pin=document.getElementById('pin'), go=document.getElementById('go');
+      function urlCon(k){ return base + '?page=panel&key=' + encodeURIComponent(k); }
+      function setHref(){ go.href = urlCon((pin.value||'').trim()); }
+      // recordar la llave (como ORBI)
+      try{
+        if(intento){ localStorage.removeItem(LS); }
+        else { var saved=localStorage.getItem(LS); if(saved){ go.href=urlCon(saved); go.click(); } }
+      }catch(e){}
+      pin.addEventListener('input', setHref); setHref();
+      go.addEventListener('click', function(){ var k=(pin.value||'').trim(); if(k){ try{localStorage.setItem(LS,k);}catch(e){} go.href=urlCon(k); } });
+      pin.addEventListener('keydown', function(e){ if(e.key==='Enter'){ go.click(); } });
+      pin.focus();
+    </script>
+  </body></html>`;
+}
+
+/************ WEB APP — PANEL (una sola página) ************/
+
+function htmlApp_(config) {
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">${estilosWeb_(config)}</head>
+  <body>
+
+  <!-- ===== PANEL ===== -->
+  <div class="card" id="vpanel">
+    ${cabeceraWeb_(config, "Panel del barbero")}
+    <div class="body">
+      <div class="datenav">
+        <button class="arrow" onclick="mover(-1)">‹</button>
+        <div class="d" id="fechaLbl">…</div>
+        <button class="arrow" onclick="mover(1)">›</button>
+      </div>
+      <div class="stats">
+        <div class="stat"><b id="stTot">0</b><span>Citas</span></div>
+        <div class="stat"><b id="stDone">0</b><span>Hechas</span></div>
+        <div class="stat"><b id="stCash">$0</b><span>Del día</span></div>
+      </div>
+      <button class="btnmain" onclick="showAgendar()">➕ Agendar cita</button>
+      <div class="chips" id="chips" style="margin-top:14px"></div>
+      <div class="seclbl">Agenda del día</div>
+      <div id="list"><div class="empty">Cargando…</div></div>
+    </div>
+    <div class="foot">BARBER OS Lite</div>
+  </div>
+
+  <!-- ===== AGENDAR ===== -->
+  <div class="card hide" id="vagendar">
+    <div class="head" style="position:relative">
+      <button class="back" onclick="showPanel()">‹</button>
+      <div class="brand">➕ Nueva cita</div>
+      <div class="tag">${escaparHtml_(config["NOMBRE_BARBERIA"] || "Barber Studio")}</div>
+    </div>
+    <div class="body">
+      <div class="seg">
+        <button id="segEx" class="on" onclick="setModo('ex')">Cliente existente</button>
+        <button id="segNu" onclick="setModo('nu')">Cliente nuevo</button>
+      </div>
+
+      <div id="boxEx">
+        <label>Selecciona al cliente</label>
+        <select id="cli" onchange="autofill()"><option value="">— Elige —</option></select>
+        <div id="cliData" class="hide">
+          <label>Nombre <span class="lockbadge">auto</span></label>
+          <input id="exNom" readonly>
+          <div class="two">
+            <div><label>Teléfono <span class="lockbadge">auto</span></label><input id="exTel" readonly></div>
+            <div><label>Email <span class="lockbadge">auto</span></label><input id="exMail" readonly></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="boxNu" class="hide">
+        <label>Nombre completo</label>
+        <input id="nuNom" placeholder="Ej: Juan Pérez">
+        <div class="two">
+          <div><label>Teléfono</label><input id="nuTel" inputmode="tel" placeholder="9671234567"></div>
+          <div><label>Email</label><input id="nuMail" type="email" placeholder="Opcional"></div>
+        </div>
+      </div>
+
+      <label>Barbero que atiende</label>
+      <select id="barbero"></select>
+
+      <label>Servicio</label>
+      <select id="serv" onchange="calcFin()"></select>
+
+      <div class="two">
+        <div><label>Fecha</label><input id="fecha" type="date"></div>
+        <div><label>Hora de inicio</label><input id="ini" type="time" value="10:00" onchange="calcFin()"></div>
+      </div>
+      <div class="endnote">🕒 La cita sería de <b id="rango">—</b> (según el servicio).</div>
+
+      <button class="btnmain" style="margin-top:18px" id="btnGuardar" onclick="guardar()">Guardar cita</button>
+      <p style="font-size:11px;color:#999;text-align:center;margin:10px 0 0;">El agradecimiento al cliente se envía solo, 1 h después de completar la cita.</p>
+      <div id="msg" class="msg"></div>
+    </div>
+    <div class="foot">BARBER OS Lite</div>
+  </div>
+
+  <script>
+    var LISTAS={clientes:[],barberos:[],servicios:[]};
+    var cur=new Date(); cur.setHours(0,0,0,0);
+    var filtroBarbero="";
+    var DIAS=["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
+    var MESES=["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+
+    function iso(d){ return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2); }
+    function fechaLarga(d){ return DIAS[d.getDay()]+' '+d.getDate()+' de '+MESES[d.getMonth()]; }
+    function fmt12(hhmm){ if(!hhmm)return''; var p=String(hhmm).split(':'),h=+p[0],m=+p[1]||0,pa=h<12?'a.m.':'p.m.',h12=h%12; if(h12===0)h12=12; return h12+(m?(':'+('0'+m).slice(-2)):'')+' '+pa; }
+
+    function mover(n){ cur.setDate(cur.getDate()+n); cargar(); }
+    function cargar(){
+      document.getElementById('fechaLbl').textContent=fechaLarga(cur);
+      document.getElementById('list').innerHTML='<div class="empty">Cargando…</div>';
+      google.script.run.withSuccessHandler(pintar).withFailureHandler(function(e){
+        document.getElementById('list').innerHTML='<div class="empty">Error: '+(e&&e.message||e)+'</div>';
+      }).appCargarDia(iso(cur));
+    }
+    function pintar(r){
+      document.getElementById('stTot').textContent=r.stats.total;
+      document.getElementById('stDone').textContent=r.stats.done;
+      document.getElementById('stCash').textContent='$'+r.stats.cash;
+      var L=document.getElementById('list'); L.innerHTML='';
+      var citas=r.citas.filter(function(c){ return !filtroBarbero || c.b===filtroBarbero; });
+      if(citas.length===0){ L.innerHTML='<div class="empty">Sin citas este día.</div>'; return; }
+      citas.forEach(function(c){
+        var act;
+        if(c.estado==='done') act='<button class="conf">Completada ✓</button>';
+        else if(c.estado==='canc') act='<button class="cancd">Cancelada</button>';
+        else act='<div class="acts"><button class="conf" onclick="conf(\\''+c.id+'\\',\\'done\\')">Confirmar</button><button class="xbtn" onclick="conf(\\''+c.id+'\\',\\'canc\\')">Cancelar</button></div>';
+        var el=document.createElement('div');
+        el.className='appt'+(c.estado==='done'?' done':'')+(c.estado==='canc'?' canc':'');
+        el.innerHTML='<div class="time"><div class="s">'+(c.ini||'')+'</div><div class="e">'+(c.fin?('a '+c.fin):'')+'</div></div>'+
+          '<div class="info"><div class="nm">'+c.n+'</div><div class="sv">✂️ '+c.s+(c.b?(' · 💈 '+c.b):'')+'</div><div class="ph">📞 '+(c.t||'—')+'</div></div>'+
+          '<div class="act">'+act+'</div>';
+        L.appendChild(el);
+      });
+    }
+    function conf(id,accion){
+      google.script.run.withSuccessHandler(function(){ cargar(); }).withFailureHandler(function(e){ alert('Error: '+(e&&e.message||e)); }).appConfirmar(id,accion);
+    }
+    function pintarChips(){
+      var c=document.getElementById('chips'); c.innerHTML='';
+      if(LISTAS.barberos.length<2){ return; }
+      var todos=document.createElement('div'); todos.className='chip'+(filtroBarbero===''?' on':''); todos.textContent='Todos'; todos.onclick=function(){ filtroBarbero=''; pintarChips(); cargar(); }; c.appendChild(todos);
+      LISTAS.barberos.forEach(function(b){ var ch=document.createElement('div'); ch.className='chip'+(filtroBarbero===b?' on':''); ch.textContent=b; ch.onclick=function(){ filtroBarbero=b; pintarChips(); cargar(); }; c.appendChild(ch); });
+    }
+
+    function initListas(r){
+      LISTAS=r;
+      var cli=document.getElementById('cli');
+      r.clientes.forEach(function(c,i){ var o=document.createElement('option'); o.value=i; o.textContent=c.n+' · '+c.t; cli.appendChild(o); });
+      var bs=document.getElementById('barbero'); bs.innerHTML='';
+      r.barberos.forEach(function(b){ var o=document.createElement('option'); o.textContent=b; bs.appendChild(o); });
+      var sv=document.getElementById('serv'); sv.innerHTML='';
+      r.servicios.forEach(function(s){ var o=document.createElement('option'); o.value=s.nombre; o.setAttribute('data-min',s.min); o.textContent=s.nombre+' · '+s.min+' min'; sv.appendChild(o); });
+      pintarChips(); calcFin();
+    }
+
+    function showAgendar(){ document.getElementById('fecha').value=iso(cur); document.getElementById('vpanel').classList.add('hide'); document.getElementById('vagendar').classList.remove('hide'); window.scrollTo(0,0); }
+    function showPanel(){ document.getElementById('vagendar').classList.add('hide'); document.getElementById('vpanel').classList.remove('hide'); }
+    function setModo(m){
+      document.getElementById('segEx').classList.toggle('on',m==='ex');
+      document.getElementById('segNu').classList.toggle('on',m==='nu');
+      document.getElementById('boxEx').classList.toggle('hide',m!=='ex');
+      document.getElementById('boxNu').classList.toggle('hide',m!=='nu');
+    }
+    function autofill(){
+      var v=document.getElementById('cli').value, box=document.getElementById('cliData');
+      if(v===''){ box.classList.add('hide'); return; }
+      var c=LISTAS.clientes[+v];
+      document.getElementById('exNom').value=c.n; document.getElementById('exTel').value=c.t; document.getElementById('exMail').value=c.m||'—';
+      box.classList.remove('hide');
+    }
+    function calcFin(){
+      var ini=document.getElementById('ini').value||'10:00';
+      var opt=document.querySelector('#serv option:checked');
+      var min=opt?(+opt.getAttribute('data-min')):45;
+      var p=ini.split(':'), d=new Date(2000,0,1,+p[0],+p[1]||0), f=new Date(d.getTime()+min*60000);
+      var fin=('0'+f.getHours()).slice(-2)+':'+('0'+f.getMinutes()).slice(-2);
+      document.getElementById('rango').textContent=fmt12(ini)+' a '+fmt12(fin);
+    }
+    function guardar(){
+      var modo=document.getElementById('segEx').classList.contains('on')?'ex':'nu';
+      var d={modo:modo, barbero:document.getElementById('barbero').value, servicio:document.getElementById('serv').value,
+             fecha:document.getElementById('fecha').value, horaIni:document.getElementById('ini').value};
+      if(modo==='ex'){ d.nombre=document.getElementById('exNom').value; d.telefono=document.getElementById('exTel').value; d.email=document.getElementById('exMail').value; }
+      else { d.nombre=document.getElementById('nuNom').value; d.telefono=document.getElementById('nuTel').value; d.email=document.getElementById('nuMail').value; }
+      if(d.email==='—') d.email='';
+      var msg=document.getElementById('msg'), btn=document.getElementById('btnGuardar');
+      btn.disabled=true; btn.textContent='Guardando…'; msg.className='msg';
+      google.script.run.withSuccessHandler(function(r){
+        btn.disabled=false; btn.textContent='Guardar cita';
+        if(r&&r.ok){ cur=new Date(d.fecha+'T00:00:00'); showPanel(); cargar(); }
+        else { msg.className='msg err'; msg.textContent=(r&&r.mensaje)||'Error al guardar.'; }
+      }).withFailureHandler(function(e){ btn.disabled=false; btn.textContent='Guardar cita'; msg.className='msg err'; msg.textContent='Error: '+(e&&e.message||e); }).appAgendar(d);
+    }
+
+    google.script.run.withSuccessHandler(initListas).appListas();
+    cargar();
+  </script>
+  </body></html>`;
+}
+
+/************ WEB APP — FUNCIONES DE SERVIDOR (google.script.run) ************/
+
+function appListas() {
+  return { clientes: getClientesLista_(), barberos: getBarberos_(), servicios: getServiciosDetalle_() };
+}
+
+function appCargarDia(fechaISO) {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.CITAS);
+  const out = { citas: [], stats: { total: 0, done: 0, cash: 0 } };
+  if (!hoja) return out;
+  const data = hoja.getDataRange().getValues();
+  if (data.length <= 1) return out;
+  const headers = data[0];
+  const objetivo = limpiarFecha_(fechaISO);
+  if (!objetivo) return out;
+
+  for (let i = 1; i < data.length; i++) {
+    const fila = data[i];
+    const fecha = limpiarFecha_(getValor_(fila, headers, "FECHA_CITA"));
+    if (!fecha || fecha.getTime() !== objetivo.getTime()) continue;
+
+    const estadoRaw = String(getValor_(fila, headers, "ESTADO_CITA")).toUpperCase();
+    let estado = "pend";
+    if (estadoRaw === "COMPLETADA") estado = "done";
+    else if (estadoRaw === "CANCELADA" || estadoRaw === "REAGENDADA") estado = "canc";
+
+    const serv = getValor_(fila, headers, "SERVICIO");
+    if (estado === "done") { out.stats.done++; out.stats.cash += obtenerPrecioServicio_(serv); }
+    if (estado !== "canc") out.stats.total++;
+
+    out.citas.push({
+      id:     String(getValor_(fila, headers, "ID_CITA")),
+      ini:    formatearHora_(getValor_(fila, headers, "HORA_CITA")),
+      fin:    formatearHora_(getValor_(fila, headers, "HORA_FIN")),
+      n:      getValor_(fila, headers, "NOMBRE_CLIENTE"),
+      s:      serv,
+      b:      getValor_(fila, headers, "BARBERO"),
+      t:      getValor_(fila, headers, "TELEFONO"),
+      estado: estado,
+      _o:     (function(){ const h=String(getValor_(fila, headers, "HORA_CITA")).split(":"); return (Number(h[0])||0)*60+(Number(h[1])||0); })()
+    });
+  }
+  out.citas.sort((a, b) => a._o - b._o);
+  return out;
+}
+
+function appConfirmar(idCita, accion) {
+  try {
+    const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.CITAS);
+    if (!hoja) return { ok: false };
+    const data = hoja.getDataRange().getValues();
+    const headers = data[0];
+    const config = cargarConfig_();
+    let fila = -1;
+    for (let i = 1; i < data.length; i++) {
+      if (String(getValor_(data[i], headers, "ID_CITA")) === String(idCita)) { fila = i + 1; break; }
+    }
+    if (fila === -1) return { ok: false };
+
+    if (accion === "done") {
+      setValor_(hoja, headers, fila, "ESTADO_CITA", "COMPLETADA");
+      setValor_(hoja, headers, fila, "FECHA_COMPLETADA", new Date());
+      registrarOActualizarCliente_(data[fila - 1], headers, config, true);
+      registrarLog_("PANEL_COMPLETADA", getValor_(data[fila - 1], headers, "NOMBRE_CLIENTE"), idCita, "OK");
+    } else if (accion === "canc") {
+      setValor_(hoja, headers, fila, "ESTADO_CITA", "CANCELADA");
+      registrarLog_("PANEL_CANCELADA", getValor_(data[fila - 1], headers, "NOMBRE_CLIENTE"), idCita, "OK");
+    }
+    return { ok: true };
+  } catch (e) {
+    registrarLog_("ERROR_PANEL", "", idCita, e.message);
+    return { ok: false, mensaje: e.message };
+  }
+}
+
+function appAgendar(d) {
+  try {
+    d = d || {};
+    const nombre   = String(d.nombre   || "").trim();
+    const telefono = String(d.telefono || "").trim();
+    const email    = String(d.email    || "").trim();
+    const barbero  = String(d.barbero  || "").trim();
+    const servicio = String(d.servicio || "").trim();
+    const fechaRaw = String(d.fecha    || "").trim();
+    const horaIni  = String(d.horaIni  || "").trim();
+
+    if (!nombre || !telefono || !servicio || !fechaRaw || !horaIni) {
+      return { ok: false, mensaje: "Faltan datos: revisa cliente, servicio, fecha y hora." };
+    }
+    const fechaDate = limpiarFecha_(fechaRaw);
+    if (!fechaDate) return { ok: false, mensaje: "Fecha inválida." };
+
+    const config  = cargarConfig_();
+    const ss      = SpreadsheetApp.getActiveSpreadsheet();
+    const hoja    = ss.getSheetByName(HOJAS.CITAS);
+    if (!hoja) return { ok: false, mensaje: "Hoja CITAS no encontrada." };
+
+    const telNorm = normalizarTelefono_(telefono, config) || telefono;
+    const horaFin = calcularHoraFin_(horaIni, servicio);
+
+    // Cliente
+    upsertClienteBasico_(nombre, telNorm, email);
+
+    // Confirmación al cliente (marca enviado solo si de verdad salió)
+    const plantillas = cargarPlantillas_();
+    const vars = { NOMBRE: nombre, FECHA: formatearFechaAmable_(fechaDate), HORA: formatearHoraAmable_(horaIni), SERVICIO: servicio };
+    const enviado = enviarMensajeCliente_(telNorm, email,
+      construirMensajeDesdeCache_(plantillas, "CONFIRMACION_CITA", vars, config), "CONFIRMACION_CITA", config, vars);
+
+    appendFila_(hoja, {
+      ID_CITA: crearId_("CITA"), FECHA_REGISTRO: new Date(), NOMBRE_CLIENTE: nombre,
+      TELEFONO: telNorm, EMAIL_CLIENTE: email, SERVICIO: servicio, BARBERO: barbero,
+      FECHA_CITA: fechaDate, HORA_CITA: horaIni, HORA_FIN: horaFin, ESTADO_CITA: "AGENDADA",
+      MENSAJE_CONFIRMACION_ENVIADO: enviado ? "SÍ" : ""
+    });
+
+    registrarLog_("PANEL_AGENDADA", nombre, `${servicio} | ${fechaRaw} ${horaIni}-${horaFin} | ${barbero}`, "OK");
+    return { ok: true, mensaje: "Cita agendada." };
+  } catch (e) {
+    registrarLog_("ERROR_AGENDAMIENTO", "", "", e.message);
+    return { ok: false, mensaje: "Error: " + e.message };
+  }
+}
+
+/************ DATOS DE APOYO ************/
+
+function getClientesLista_() {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.CLIENTES);
+  if (!hoja) return [];
+  const data = hoja.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const h = data[0]; const cfg = cargarConfig_();
+  const map = {}; const orden = [];
+  for (let i = 1; i < data.length; i++) {
+    if (String(getValor_(data[i], h, "ESTADO_CLIENTE")).toUpperCase() === "INACTIVO") continue;
+    const n = getValor_(data[i], h, "NOMBRE"); const t = getValor_(data[i], h, "TELEFONO");
+    if (!n || !t) continue;
+    const key = telClave_(t, cfg);                    // colapsa el mismo número en distintos formatos
+    const m = String(getValor_(data[i], h, "EMAIL_CLIENTE") || "");
+    if (!map[key]) { map[key] = { n: String(n), t: String(t), m: m }; orden.push(key); }
+    else if (!map[key].m && m) { map[key].m = m; }     // completa el email si faltaba
+  }
+  const lista = orden.map(k => map[k]);
+  lista.sort((a, b) => a.n.localeCompare(b.n));
+  return lista;
+}
+
+function getBarberos_() {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.BARBEROS);
+  const lista = [];
+  if (hoja) {
+    const data = hoja.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] && String(data[i][1]).toUpperCase().indexOf("S") === 0) lista.push(String(data[i][0]).trim());
+    }
+  }
+  if (lista.length === 0) {
+    const nb = String(cargarConfig_()["NOMBRE_BARBERO"] || "").trim();
+    lista.push(nb || "Barbero");
+  }
+  return lista;
+}
+
+function getServiciosDetalle_() {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.SERVICIOS);
+  const lista = [];
+  if (hoja) {
+    const data = hoja.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (!data[i][0]) continue;
+      if (String(data[i][3]).toUpperCase().indexOf("S") !== 0) continue;
+      lista.push({ nombre: String(data[i][0]), min: Number(data[i][1]) || 45, precio: Number(data[i][2]) || 0 });
+    }
+  }
+  if (lista.length === 0) lista.push({ nombre: "Corte", min: 45, precio: 0 });
+  return lista;
+}
+
+function obtenerDuracionServicio_(servicio) {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.SERVICIOS);
+  if (!hoja) return 45;
+  const data = hoja.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).toLowerCase() === String(servicio).toLowerCase()) return Number(data[i][1]) || 45;
+  }
+  return 45;
+}
+
+function obtenerPrecioServicio_(servicio) {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.SERVICIOS);
+  if (!hoja) return 0;
+  const data = hoja.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).toLowerCase() === String(servicio).toLowerCase()) return Number(data[i][2]) || 0;
+  }
+  return 0;
+}
+
+function calcularHoraFin_(horaIni, servicio) {
+  const min = obtenerDuracionServicio_(servicio);
+  const p = String(horaIni).split(":");
+  const d = new Date(2000, 0, 1, Number(p[0]) || 0, Number(p[1]) || 0);
+  const f = new Date(d.getTime() + min * 60000);
+  return ("0" + f.getHours()).slice(-2) + ":" + ("0" + f.getMinutes()).slice(-2);
+}
+
+function upsertClienteBasico_(nombre, telefono, email) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = ss.getSheetByName(HOJAS.CLIENTES);
+  if (!hoja) return;
+  const data = hoja.getDataRange().getValues();
+  const h = data[0]; const cfg = cargarConfig_(); const key = telClave_(telefono, cfg);
+  const iTel = h.indexOf("TELEFONO");
+  for (let i = 1; i < data.length; i++) {
+    if (telClave_(data[i][iTel], cfg) === key) {
+      setValor_(hoja, h, i + 1, "NOMBRE", nombre);
+      setValor_(hoja, h, i + 1, "TELEFONO", telefono);   // normaliza el guardado
+      if (email) setValor_(hoja, h, i + 1, "EMAIL_CLIENTE", email);
+      setValor_(hoja, h, i + 1, "ESTADO_CLIENTE", "ACTIVO");
+      return;
+    }
+  }
+  appendFila_(hoja, {
+    ID_CLIENTE: crearId_("CLI"), NOMBRE: nombre, TELEFONO: telefono,
+    EMAIL_CLIENTE: email || "", TOTAL_VISITAS: 0, ESTADO_CLIENTE: "ACTIVO"
+  });
+}
+
+/************ CREACIÓN / MIGRACIÓN DE HOJAS ************/
+
+function crearHojaConfig_(ss, forzar) {
+  const datos = [
+    ["NOMBRE_BARBERIA",         "Barber Studio", "Nombre comercial de la barbería"],
+    ["TELEFONO_BARBERIA",       "",              "Teléfono de contacto (aparece en emails y páginas)"],
+    ["INSTAGRAM_BARBERIA",      "",              "Usuario Instagram sin @ (aparece en emails)"],
+    ["LOGO_URL",                "",              "URL pública de la imagen del logo (PNG/JPG). Vacío = ícono ✂️"],
+    ["EMAIL_BARBERO",           "",              "Correo del barbero — recibe el resumen del día"],
+    ["NOMBRE_BARBERO",          "",              "Nombre del barbero principal (respaldo si BARBEROS está vacía)"],
+    ["DIAS_RECORDATORIO_CORTE", "21",            "Días para enviar 'Ya te toca corte'"],
+    ["LADA_PAIS",               "52",            "Código de país sin + (México = 52) para normalizar teléfonos"],
+    ["PIN_ACCESO",              "",              "Código de acceso al panel. Se genera solo al instalar."],
+    ["", "", ""],
+    ["SISTEMA_ACTIVO",          "SÍ",            "Interruptor global. NO = pausa TODOS los envíos."],
+    ["WHATSAPP_ACTIVO",         "NO",            "SÍ = envía WhatsApp por Twilio. NO = no envía WhatsApp."],
+    ["EMAIL_ACTIVO",            "SÍ",            "SÍ = envía emails al cliente por Gmail."],
+    ["", "", ""],
+    ["EMAIL_REMITENTE_NOMBRE",  "Barber Studio", "Nombre del remitente en emails"],
+    ["COLOR_ACENTO",            "#1A1A1A",       "Color de acento (botones, líneas). #HEX. Ej dorado: #C9A84C"],
+    ["", "", ""],
+    ["TWILIO_ACCOUNT_SID",      "",              "Twilio: Account SID (empieza con AC…)"],
+    ["TWILIO_AUTH_TOKEN",       "",              "Twilio: Auth Token"],
+    ["TWILIO_WHATSAPP_FROM",    "",              "Twilio: número WhatsApp remitente. Ej: whatsapp:+14155238886"],
+    ["TWILIO_MESSAGING_SERVICE_SID", "",         "Opcional: Messaging Service SID (si usas uno, ignora el FROM)"],
+    ["", "", ""],
+    ["CONTENTSID_CONFIRMACION_CITA",     "", "Twilio Content SID 'confirmación'  · vars: 1 nombre, 2 fecha, 3 hora, 4 servicio, 5 teléfono"],
+    ["CONTENTSID_RECORDATORIO_2_DIAS",   "", "Twilio Content SID 'recordatorio 2 días'  · vars: 1 nombre, 2 fecha, 3 hora, 4 teléfono"],
+    ["CONTENTSID_RECORDATORIO_DIA_CITA", "", "Twilio Content SID 'recordatorio día de la cita'  · vars: 1 nombre, 2 hora, 3 teléfono"],
+    ["CONTENTSID_AGRADECIMIENTO",        "", "Twilio Content SID 'agradecimiento'  · vars: 1 nombre, 2 teléfono"],
+    ["CONTENTSID_YA_TOCA_CORTE",         "", "Twilio Content SID 'ya te toca corte'  · vars: 1 nombre, 2 teléfono"]
+  ];
+  crearOReiniciarHoja_(ss, HOJAS.CONFIG, ["CLAVE", "VALOR", "DESCRIPCIÓN"], datos, forzar);
+}
+
+function crearHojaClientes_(ss, forzar) {
+  crearOReiniciarHoja_(ss, HOJAS.CLIENTES, [
+    "ID_CLIENTE","NOMBRE","TELEFONO","EMAIL_CLIENTE",
+    "ULTIMA_VISITA","PROXIMO_RECORDATORIO_CORTE","TOTAL_VISITAS","ESTADO_CLIENTE","NOTAS"
+  ], [], forzar);
+}
+
+function crearHojaCitas_(ss, forzar) {
+  crearOReiniciarHoja_(ss, HOJAS.CITAS, [
+    "ID_CITA","FECHA_REGISTRO","NOMBRE_CLIENTE","TELEFONO","EMAIL_CLIENTE",
+    "SERVICIO","BARBERO","FECHA_CITA","HORA_CITA","HORA_FIN","ESTADO_CITA","FECHA_COMPLETADA",
+    "MENSAJE_CONFIRMACION_ENVIADO","RECORDATORIO_2_DIAS_ENVIADO",
+    "RECORDATORIO_DIA_CITA_ENVIADO","AGRADECIMIENTO_ENVIADO","YA_TOCA_CORTE_ENVIADO","NOTAS"
+  ], [], forzar);
+}
+
+function crearHojaServicios_(ss, forzar) {
+  crearOReiniciarHoja_(ss, HOJAS.SERVICIOS, ["SERVICIO","DURACION_MINUTOS","PRECIO_ESTIMADO","ACTIVO"], [
+    ["Corte","45","250","SÍ"],["Barba","30","150","SÍ"],
+    ["Corte + Barba","60","350","SÍ"],["Diseño","60","300","SÍ"]
+  ], forzar);
+}
+
+function crearHojaBarberos_(ss, forzar) {
+  crearOReiniciarHoja_(ss, HOJAS.BARBEROS, ["NOMBRE","ACTIVO"], [
+    ["Barbero 1","SÍ"]
+  ], forzar);
+}
+
+function crearHojaMensajes_(ss, forzar) {
+  crearOReiniciarHoja_(ss, HOJAS.MENSAJES, ["TIPO_MENSAJE","PLANTILLA"], [
+    ["CONFIRMACION_CITA",     "Hola {{NOMBRE}} ✂️ Tu cita en {{BARBERIA}} quedó agendada para el {{FECHA}} a las {{HORA}} (servicio: {{SERVICIO}}). Para dudas o cambios escríbenos al {{TELEFONO}}. ¡Te esperamos!"],
+    ["RECORDATORIO_2_DIAS",   "Hola {{NOMBRE}} 👋 Te recordamos tu cita en {{BARBERIA}} el {{FECHA}} a las {{HORA}}. Para cualquier cosa escríbenos al {{TELEFONO}}. ¡Ahí te esperamos!"],
+    ["RECORDATORIO_DIA_CITA", "Hola {{NOMBRE}} ✂️ Nos vemos hoy a las {{HORA}} en {{BARBERIA}}. Si necesitas algo escríbenos al {{TELEFONO}}. ¡Te esperamos!"],
+    ["AGRADECIMIENTO",        "Gracias por visitarnos hoy, {{NOMBRE}} ✂️ Para tu próxima cita escríbenos al {{TELEFONO}}. ¡Nos vemos pronto en {{BARBERIA}}!"],
+    ["YA_TOCA_CORTE",         "Hola {{NOMBRE}} 👋 Ya pasaron algunos días desde tu último corte. Agenda escribiéndonos al {{TELEFONO}}. ¡Te esperamos en {{BARBERIA}}! ✂️"]
+  ], forzar);
+}
+
+function crearHojaLog_(ss, forzar) {
+  crearOReiniciarHoja_(ss, HOJAS.LOG, ["FECHA_HORA","TIPO","DESTINATARIO","MENSAJE","RESULTADO"], [], forzar);
+}
+
+function crearOReiniciarHoja_(ss, nombre, headers, datos, forzar) {
+  let hoja = ss.getSheetByName(nombre);
+  if (!hoja) { hoja = ss.insertSheet(nombre); }
+  else { if (!forzar && hoja.getLastRow() > 1) { Logger.log(`[SKIP] "${nombre}" ya tiene datos.`); return; } hoja.clear(); }
+  hoja.getRange(1, 1, 1, headers.length).setValues([headers]);
+  if (datos.length > 0) hoja.getRange(2, 1, datos.length, headers.length).setValues(datos);
+  hoja.setFrozenRows(1);
+  hoja.autoResizeColumns(1, headers.length);
+  hoja.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#111111").setFontColor("#ffffff").setHorizontalAlignment("center");
+  hoja.getDataRange().setVerticalAlignment("middle");
+}
+
+function migrarEsquema_() {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.CITAS);
+  if (!hoja) return;
+  const headers = hoja.getRange(1, 1, 1, Math.max(1, hoja.getLastColumn())).getValues()[0].map(v => String(v).trim());
+  ["BARBERO", "HORA_FIN", "FECHA_COMPLETADA"].forEach(function (col) {
+    if (headers.indexOf(col) === -1) {
+      const c = hoja.getLastColumn() + 1;
+      hoja.getRange(1, c).setValue(col).setFontWeight("bold").setBackground("#111111").setFontColor("#ffffff");
+      headers.push(col);
+    }
+  });
+}
+
+function guardarEnConfig_(ss, clave, valor) {
+  const hoja = ss.getSheetByName(HOJAS.CONFIG);
+  if (!hoja) return;
+  const data = hoja.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === clave) { hoja.getRange(i + 1, 2).setValue(valor); return; }
+  }
+  hoja.appendRow([clave, valor, "Generado automáticamente"]);
+}
+
+/************ PAUSA GLOBAL ************/
+
+function sistemaActivo_(config) {
+  const cfg = config || cargarConfig_();
+  const v = String(cfg["SISTEMA_ACTIVO"] == null ? "SÍ" : cfg["SISTEMA_ACTIVO"]).trim().toUpperCase();
+  return v !== "NO" && v !== "PAUSADO" && v !== "OFF";
+}
+
+function alternarPausaSistema() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const act = sistemaActivo_();
+  guardarEnConfig_(ss, "SISTEMA_ACTIVO", act ? "NO" : "SÍ");
+  registrarLog_("SISTEMA", "admin", act ? "PAUSA" : "REANUDAR", act ? "Pausado" : "Reanudado");
+  ui.alert(act ? "⏸️ Sistema pausado" : "▶️ Sistema reanudado",
+    act ? "Se detuvieron los envíos. Las citas se siguen registrando." : "Los envíos están activos de nuevo.",
+    ui.ButtonSet.OK);
+}
+
+/************ PROCESAR CITAS (respaldo horario, sin Calendar) ************/
+
+function procesarCitasPendientes() {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.CITAS);
+  if (!hoja) return;
+  const config = cargarConfig_();
+  const plantillas = cargarPlantillas_();
+  const data = hoja.getDataRange().getValues();
+  if (data.length <= 1) return;
+  const headers = data[0];
+
+  for (let i = 1; i < data.length; i++) {
+    const fila = data[i]; const row = i + 1;
+    const nombre = getValor_(fila, headers, "NOMBRE_CLIENTE");
+    const telefono = getValor_(fila, headers, "TELEFONO");
+    const servicio = getValor_(fila, headers, "SERVICIO");
+    const fechaCita = getValor_(fila, headers, "FECHA_CITA");
+    const horaCita = getValor_(fila, headers, "HORA_CITA");
+    if (!nombre || !telefono || !servicio || !fechaCita || !horaCita) continue;
+    if (esCitaCerrada_(getValor_(fila, headers, "ESTADO_CITA"))) continue;
+
+    if (getValor_(fila, headers, "MENSAJE_CONFIRMACION_ENVIADO") !== "SÍ") {
+      const vars = { NOMBRE: nombre, FECHA: formatearFechaAmable_(fechaCita), HORA: formatearHoraAmable_(horaCita), SERVICIO: servicio };
+      const msg = construirMensajeDesdeCache_(plantillas, "CONFIRMACION_CITA", vars, config);
+      if (enviarMensajeCliente_(telefono, getValor_(fila, headers, "EMAIL_CLIENTE"), msg, "CONFIRMACION_CITA", config, vars)) {
+        setValor_(hoja, headers, row, "MENSAJE_CONFIRMACION_ENVIADO", "SÍ");
+      }
+    }
+  }
+}
+
+/************ CLIENTES (visitas) ************/
+
+function registrarOActualizarCliente_(fila, headers, config, incrementarVisita) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = ss.getSheetByName(HOJAS.CLIENTES);
+  if (!hoja) return;
+  const data = hoja.getDataRange().getValues();
+  const h = data[0];
+  const nombre = getValor_(fila, headers, "NOMBRE_CLIENTE");
+  const telefono = getValor_(fila, headers, "TELEFONO");
+  const email = getValor_(fila, headers, "EMAIL_CLIENTE");
+  const fechaCita = getValor_(fila, headers, "FECHA_CITA");
+  const notas = getValor_(fila, headers, "NOTAS");
+  if (!nombre || !telefono) return;
+
+  let filaCliente = -1;
+  const iTel = h.indexOf("TELEFONO"); const key = telClave_(telefono, config);
+  for (let i = 1; i < data.length; i++) {
+    if (telClave_(data[i][iTel], config) === key) { filaCliente = i + 1; break; }
+  }
+  const dias = Number(config["DIAS_RECORDATORIO_CORTE"]) || 21;
+  let proximo = "";
+  if (fechaCita) { const p = new Date(fechaCita); if (!isNaN(p.getTime())) { p.setDate(p.getDate() + dias); proximo = p; } }
+
+  if (filaCliente === -1) {
+    appendFila_(hoja, {
+      ID_CLIENTE: crearId_("CLI"), NOMBRE: nombre, TELEFONO: telefono, EMAIL_CLIENTE: email || "",
+      ULTIMA_VISITA: incrementarVisita ? fechaCita : "", PROXIMO_RECORDATORIO_CORTE: incrementarVisita ? proximo : "",
+      TOTAL_VISITAS: incrementarVisita ? 1 : 0, ESTADO_CLIENTE: "ACTIVO", NOTAS: notas || ""
+    });
+    return;
+  }
+  setValor_(hoja, h, filaCliente, "NOMBRE", nombre);
+  if (email) setValor_(hoja, h, filaCliente, "EMAIL_CLIENTE", email);
+  setValor_(hoja, h, filaCliente, "ESTADO_CLIENTE", "ACTIVO");
+  if (notas) setValor_(hoja, h, filaCliente, "NOTAS", notas);
+  if (incrementarVisita) {
+    const total = Number(hoja.getRange(filaCliente, h.indexOf("TOTAL_VISITAS") + 1).getValue()) || 0;
+    setValor_(hoja, h, filaCliente, "ULTIMA_VISITA", fechaCita);
+    setValor_(hoja, h, filaCliente, "PROXIMO_RECORDATORIO_CORTE", proximo);
+    setValor_(hoja, h, filaCliente, "TOTAL_VISITAS", total + 1);
+  }
+}
+
+/************ RECORDATORIOS ************/
+
+function enviarRecordatorios() {
+  if (!sistemaActivo_()) { registrarLog_("SISTEMA", "recordatorios", "", "PAUSADO"); return; }
+  const config = cargarConfig_(); const plantillas = cargarPlantillas_();
+  enviarRecordatorioDosDias_(config, plantillas);
+  enviarRecordatorioDiaCita_(config, plantillas);
+}
+
+function enviarRecordatorioDosDias_(config, plantillas) {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.CITAS);
+  if (!hoja) return;
+  const data = hoja.getDataRange().getValues(); if (data.length <= 1) return;
+  const headers = data[0]; const hoy = limpiarFecha_(new Date());
+  const objetivo = new Date(hoy); objetivo.setDate(objetivo.getDate() + 2);
+  for (let i = 1; i < data.length; i++) {
+    const fila = data[i]; const row = i + 1;
+    if (esCitaCerrada_(getValor_(fila, headers, "ESTADO_CITA"))) continue;
+    const fecha = limpiarFecha_(getValor_(fila, headers, "FECHA_CITA"));
+    if (!fecha || fecha.getTime() !== objetivo.getTime() || getValor_(fila, headers, "RECORDATORIO_2_DIAS_ENVIADO") === "SÍ") continue;
+    const nombre = getValor_(fila, headers, "NOMBRE_CLIENTE");
+    const vars = { NOMBRE: nombre, FECHA: formatearFechaAmable_(fecha), HORA: formatearHoraAmable_(getValor_(fila, headers, "HORA_CITA")), SERVICIO: getValor_(fila, headers, "SERVICIO") };
+    if (enviarMensajeCliente_(getValor_(fila, headers, "TELEFONO"), getValor_(fila, headers, "EMAIL_CLIENTE"),
+        construirMensajeDesdeCache_(plantillas, "RECORDATORIO_2_DIAS", vars, config), "RECORDATORIO_2_DIAS", config, vars)) {
+      setValor_(hoja, headers, row, "RECORDATORIO_2_DIAS_ENVIADO", "SÍ");
+    }
+  }
+}
+
+function enviarRecordatorioDiaCita_(config, plantillas) {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.CITAS);
+  if (!hoja) return;
+  const data = hoja.getDataRange().getValues(); if (data.length <= 1) return;
+  const headers = data[0]; const hoy = limpiarFecha_(new Date());
+  for (let i = 1; i < data.length; i++) {
+    const fila = data[i]; const row = i + 1;
+    if (esCitaCerrada_(getValor_(fila, headers, "ESTADO_CITA"))) continue;
+    const fecha = limpiarFecha_(getValor_(fila, headers, "FECHA_CITA"));
+    if (!fecha || fecha.getTime() !== hoy.getTime() || getValor_(fila, headers, "RECORDATORIO_DIA_CITA_ENVIADO") === "SÍ") continue;
+    const nombre = getValor_(fila, headers, "NOMBRE_CLIENTE");
+    const vars = { NOMBRE: nombre, HORA: formatearHoraAmable_(getValor_(fila, headers, "HORA_CITA")), SERVICIO: getValor_(fila, headers, "SERVICIO") };
+    if (enviarMensajeCliente_(getValor_(fila, headers, "TELEFONO"), getValor_(fila, headers, "EMAIL_CLIENTE"),
+        construirMensajeDesdeCache_(plantillas, "RECORDATORIO_DIA_CITA", vars, config), "RECORDATORIO_DIA_CITA", config, vars)) {
+      setValor_(hoja, headers, row, "RECORDATORIO_DIA_CITA_ENVIADO", "SÍ");
+    }
+  }
+}
+
+/************ AGRADECIMIENTOS (diferido 1 h) ************/
+
+function enviarAgradecimientosPendientes() {
+  if (!sistemaActivo_()) return;
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.CITAS);
+  if (!hoja) return;
+  const config = cargarConfig_(); const plantillas = cargarPlantillas_();
+  const data = hoja.getDataRange().getValues(); if (data.length <= 1) return;
+  const headers = data[0]; const ahora = new Date().getTime();
+
+  for (let i = 1; i < data.length; i++) {
+    const fila = data[i]; const row = i + 1;
+    if (String(getValor_(fila, headers, "ESTADO_CITA")).toUpperCase() !== "COMPLETADA") continue;
+    if (getValor_(fila, headers, "AGRADECIMIENTO_ENVIADO") === "SÍ") continue;
+    const fc = getValor_(fila, headers, "FECHA_COMPLETADA");
+    const t = fc ? new Date(fc).getTime() : 0;
+    if (!t || (ahora - t) < 60 * 60000) continue;   // aún no pasa 1 hora
+    const nombre = getValor_(fila, headers, "NOMBRE_CLIENTE");
+    const vars = { NOMBRE: nombre, SERVICIO: getValor_(fila, headers, "SERVICIO") };
+    if (enviarMensajeCliente_(getValor_(fila, headers, "TELEFONO"), getValor_(fila, headers, "EMAIL_CLIENTE"),
+        construirMensajeDesdeCache_(plantillas, "AGRADECIMIENTO", vars, config), "AGRADECIMIENTO", config, vars)) {
+      setValor_(hoja, headers, row, "AGRADECIMIENTO_ENVIADO", "SÍ");
+    }
+  }
+}
+
+/************ YA TE TOCA CORTE ************/
+
+function enviarYaTocaCorte() {
+  if (!sistemaActivo_()) { registrarLog_("SISTEMA", "ya_toca_corte", "", "PAUSADO"); return; }
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.CLIENTES);
+  if (!hoja) return;
+  const config = cargarConfig_(); const plantillas = cargarPlantillas_();
+  const data = hoja.getDataRange().getValues(); if (data.length <= 1) return;
+  const headers = data[0]; const hoy = limpiarFecha_(new Date());
+  for (let i = 1; i < data.length; i++) {
+    const fila = data[i]; const row = i + 1;
+    const nombre = getValor_(fila, headers, "NOMBRE"); const tel = getValor_(fila, headers, "TELEFONO");
+    const proximo = limpiarFecha_(getValor_(fila, headers, "PROXIMO_RECORDATORIO_CORTE"));
+    if (!nombre || !tel || !proximo) continue;
+    if (String(getValor_(fila, headers, "ESTADO_CLIENTE")).toUpperCase() === "INACTIVO") continue;
+    if (proximo.getTime() > hoy.getTime()) continue;
+    const vars = { NOMBRE: nombre };
+    if (enviarMensajeCliente_(tel, getValor_(fila, headers, "EMAIL_CLIENTE"),
+        construirMensajeDesdeCache_(plantillas, "YA_TOCA_CORTE", vars, config), "YA_TOCA_CORTE", config, vars)) {
+      const nueva = new Date(hoy); nueva.setDate(nueva.getDate() + (Number(config["DIAS_RECORDATORIO_CORTE"]) || 21));
+      setValor_(hoja, headers, row, "PROXIMO_RECORDATORIO_CORTE", nueva);
+    }
+  }
+}
+
+/************ RESUMEN DIARIO BARBERO ************/
+
+function enviarResumenDiarioBarbero() {
+  if (!sistemaActivo_()) { registrarLog_("SISTEMA", "resumen_barbero", "", "PAUSADO"); return; }
+  const config = cargarConfig_();
+  const emailBarbero = String(config["EMAIL_BARBERO"] || "").trim();
+  const nombreBarbero = String(config["NOMBRE_BARBERO"] || "Barbero").trim();
+  if (!emailBarbero) return;
+
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.CITAS);
+  if (!hoja) return;
+  const data = hoja.getDataRange().getValues(); if (data.length <= 1) return;
+  const headers = data[0]; const hoy = limpiarFecha_(new Date());
+
+  const citasHoy = [];
+  for (let i = 1; i < data.length; i++) {
+    const fila = data[i];
+    const fecha = limpiarFecha_(getValor_(fila, headers, "FECHA_CITA"));
+    if (!fecha || fecha.getTime() !== hoy.getTime()) continue;
+    const est = String(getValor_(fila, headers, "ESTADO_CITA")).toUpperCase();
+    if (est === "CANCELADA" || est === "REAGENDADA") continue;
+    citasHoy.push({
+      hora: formatearHora_(getValor_(fila, headers, "HORA_CITA")),
+      nombre: getValor_(fila, headers, "NOMBRE_CLIENTE"),
+      servicio: getValor_(fila, headers, "SERVICIO"),
+      telefono: getValor_(fila, headers, "TELEFONO")
+    });
+  }
+  citasHoy.sort((a, b) => {
+    const m = h => { const p = String(h).split(":"); return (Number(p[0]) || 0) * 60 + (Number(p[1]) || 0); };
+    return m(a.hora) - m(b.hora);
+  });
+
+  const nombreBarberia = config["NOMBRE_BARBERIA"] || "Barber Studio";
+  const acento = config["COLOR_ACENTO"] || "#1A1A1A";
+  const logoUrl = String(config["LOGO_URL"] || "").trim();
+  const fechaStr = (() => { const s = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "EEEE dd 'de' MMMM"); return s.charAt(0).toUpperCase() + s.slice(1); })();
+  const asunto = citasHoy.length > 0 ? `📅 Tu agenda — ${fechaStr} (${citasHoy.length} cita${citasHoy.length > 1 ? "s" : ""})` : `📅 Tu agenda — ${fechaStr}`;
+
+  let textoPlano = `Hola ${nombreBarbero}, tu agenda para hoy (${fechaStr}):\n\n`;
+  citasHoy.length === 0 ? textoPlano += "No tienes citas. ¡Día libre!" : citasHoy.forEach(c => { textoPlano += `${c.hora}  ${c.nombre}  →  ${c.servicio}\n`; });
+
+  try {
+    MailApp.sendEmail({ to: emailBarbero, subject: asunto, body: textoPlano,
+      htmlBody: construirEmailResumenBarbero_(citasHoy, nombreBarbero, nombreBarberia, acento, fechaStr, logoUrl), name: nombreBarberia });
+    registrarLog_("RESUMEN_BARBERO", emailBarbero, `${citasHoy.length} citas`, "ENVIADO");
+  } catch (e) { registrarLog_("ERROR_RESUMEN_BARBERO", emailBarbero, "", e.message); }
+}
+
+function construirEmailResumenBarbero_(citas, nombreBarbero, nombreBarberia, acento, fechaStr, logoUrl) {
+  const cab = logoUrl
+    ? `<img src="${logoUrl}" alt="${nombreBarberia}" style="max-height:74px;max-width:240px;margin:0 auto 4px;display:block;"/>`
+    : `<p style="margin:0 0 6px;font-size:36px;">📅</p><p style="margin:0;font-size:22px;font-weight:700;color:#111;letter-spacing:1px;">${nombreBarberia}</p>`;
+  let filasHTML = "";
+  if (citas.length === 0) {
+    filasHTML = `<tr><td colspan="3" align="center" style="padding:32px 20px;font-size:15px;color:#888;">No tienes citas hoy.<br/><span style="font-size:28px;">🛋️</span><br/><strong style="color:#555;">¡Día libre!</strong></td></tr>`;
+  } else {
+    citas.forEach((c, idx) => {
+      const bg = idx % 2 === 0 ? "#ffffff" : "#fafafa";
+      filasHTML += `<tr style="background:${bg};"><td style="padding:14px 16px;font-size:20px;font-weight:700;color:${acento};white-space:nowrap;border-bottom:1px solid #ededed;">${c.hora}</td><td style="padding:14px 16px;border-bottom:1px solid #ededed;"><p style="margin:0;font-size:15px;font-weight:600;color:#111;">${c.nombre}</p><p style="margin:3px 0 0;font-size:12px;color:#999;">📞 ${c.telefono || "—"}</p></td><td style="padding:14px 16px;border-bottom:1px solid #ededed;white-space:nowrap;"><span style="background:#f2f2f2;border:1px solid #e2e2e2;border-radius:20px;padding:4px 12px;font-size:12px;color:#333;">✂️ ${c.servicio}</span></td></tr>`;
+    });
+  }
+  const total = citas.length > 0 ? `<tr><td colspan="3" style="padding:16px 20px;background:#fafafa;border-top:2px solid ${acento};text-align:right;"><span style="color:#999;font-size:13px;">Total: </span><span style="color:#111;font-size:16px;font-weight:700;">${citas.length} cita${citas.length > 1 ? "s" : ""}</span></td></tr>` : "";
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/></head><body style="margin:0;padding:0;background:#f4f4f5;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f5;padding:40px 16px;"><tr><td align="center"><table width="620" cellpadding="0" cellspacing="0" border="0" style="max-width:620px;width:100%;background:#fff;border-radius:14px;overflow:hidden;border:1px solid #e6e6e6;"><tr><td align="center" style="background:#fff;padding:34px 40px 24px;border-bottom:1px solid #ededed;">${cab}<p style="margin:8px 0 0;font-size:11px;color:${acento};letter-spacing:4px;text-transform:uppercase;">AGENDA DEL DÍA</p></td></tr><tr><td style="padding:32px 40px 16px;"><p style="margin:0 0 6px;font-size:12px;color:#999;text-transform:uppercase;letter-spacing:2px;">Hola, ${nombreBarbero}</p><h1 style="margin:0 0 8px;font-size:24px;font-weight:700;color:#111;">Tu agenda para hoy</h1><p style="margin:0;font-size:15px;color:#555;">${fechaStr}</p></td></tr><tr><td style="padding:0 40px 32px;"><table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:10px;overflow:hidden;border:1px solid #e6e6e6;">${filasHTML}${total}</table></td></tr><tr><td align="center" style="background:#fafafa;padding:22px 40px;border-top:1px solid #ededed;"><p style="margin:0;font-size:14px;font-weight:700;color:#111;">${nombreBarberia}</p><p style="margin:8px 0 0;font-size:11px;color:#bbb;">Enviado por BARBER OS Lite</p></td></tr></table></td></tr></table></body></html>`;
+}
+
+/************ ENVÍO DE MENSAJES (GATE DE PAUSA) ************/
+
+function enviarMensajeCliente_(telefono, email, mensajeTexto, tipo, config, vars) {
+  const cfg = config || cargarConfig_();
+  if (!sistemaActivo_(cfg)) { registrarLog_(tipo, telefono || email || "", mensajeTexto, "PAUSADO"); return false; }
+  if (esSi_(cfg["WHATSAPP_ACTIVO"])) {
+    if (telefono) enviarWhatsAppTwilio_(telefono, tipo, vars || {}, cfg, mensajeTexto);
+    else registrarLog_(tipo + "_WHATSAPP", "SIN TEL", mensajeTexto, "SIN TELEFONO");
+  } else { registrarLog_(tipo + "_WHATSAPP", telefono || "", mensajeTexto, "WHATSAPP DESACTIVADO"); }
+  if (esSi_(cfg["EMAIL_ACTIVO"]) && email) { enviarCorreoCliente_(email, mensajeTexto, tipo, cfg, vars || {}); }
+  else { registrarLog_(tipo + "_EMAIL", email || "SIN EMAIL", mensajeTexto, esSi_(cfg["EMAIL_ACTIVO"]) ? "SIN EMAIL" : "EMAIL DESACTIVADO"); }
+  return true;
+}
+
+/************ TWILIO — WHATSAPP ************/
+
+function enviarWhatsAppTwilio_(telefono, tipo, vars, config, textoFallback) {
+  try {
+    const sid = String(config["TWILIO_ACCOUNT_SID"] || "").trim();
+    const token = String(config["TWILIO_AUTH_TOKEN"] || "").trim();
+    if (!sid || !token) { registrarLog_(tipo + "_WHATSAPP", telefono, "", "FALTAN CREDENCIALES TWILIO"); return; }
+    const to = "whatsapp:" + normalizarTelefono_(telefono, config);
+    const payload = { To: to };
+    const msgService = String(config["TWILIO_MESSAGING_SERVICE_SID"] || "").trim();
+    let from = String(config["TWILIO_WHATSAPP_FROM"] || "").trim();
+    if (msgService) payload.MessagingServiceSid = msgService;
+    else if (from) {
+      from = from.replace(/^whatsapp:/i, "").trim();          // quita el prefijo si viene
+      if (from.charAt(0) !== "+") from = "+" + from.replace(/[^\d]/g, "");  // asegura +E.164
+      payload.From = "whatsapp:" + from;
+    }
+    else { registrarLog_(tipo + "_WHATSAPP", telefono, "", "FALTA FROM o MESSAGING_SERVICE_SID"); return; }
+
+    const contentSid = String(config["CONTENTSID_" + tipo] || "").trim();
+    if (contentSid) {
+      payload.ContentSid = contentSid;
+      const varsWA = Object.assign({}, vars, { TELEFONO: String(config["TELEFONO_BARBERIA"] || "").trim(), BARBERIA: String(config["NOMBRE_BARBERIA"] || "").trim() });
+      const cv = construirContentVariables_(tipo, varsWA);
+      if (cv) payload.ContentVariables = cv;
+    } else { payload.Body = textoFallback || ""; }
+
+    const url = "https://api.twilio.com/2010-04-01/Accounts/" + sid + "/Messages.json";
+    const resp = UrlFetchApp.fetch(url, { method: "post", payload: payload, headers: { Authorization: "Basic " + Utilities.base64Encode(sid + ":" + token) }, muteHttpExceptions: true });
+    const code = resp.getResponseCode(); const body = resp.getContentText();
+    if (code >= 200 && code < 300) {
+      let s = ""; try { s = JSON.parse(body).sid || ""; } catch (e) {}
+      registrarLog_(tipo + "_WHATSAPP", to, textoFallback || contentSid, "ENVIADO " + (s || code));
+    } else { registrarLog_(tipo + "_WHATSAPP", to, String(body).substring(0, 300), "ERROR " + code); }
+  } catch (e) { registrarLog_("ERROR_WHATSAPP", telefono, tipo, e.message); }
+}
+
+function construirContentVariables_(tipo, vars) {
+  const orden = ORDEN_VARIABLES_WA[tipo];
+  if (!orden || orden.length === 0) return "";
+  const obj = {};
+  orden.forEach((clave, idx) => { obj[String(idx + 1)] = String((vars && vars[clave] != null) ? vars[clave] : ""); });
+  return JSON.stringify(obj);
+}
+
+function telClave_(tel, config) {
+  return normalizarTelefono_(tel, config || cargarConfig_());
+}
+
+function normalizarTelefono_(tel, config) {
+  let s = String(tel || "").replace(/[^\d+]/g, "");
+  if (!s) return "";
+  if (s.charAt(0) === "+") return s;
+  const lada = String((config && config["LADA_PAIS"]) || "52").replace(/\D/g, "") || "52";
+  s = s.replace(/^0+/, "");
+  if (s.indexOf("00") === 0) s = s.slice(2);
+  if (s.indexOf(lada) === 0 && s.length > 10) return "+" + s;
+  return "+" + lada + s;
+}
+
+function probarWhatsAppTwilio() {
+  const ui = SpreadsheetApp.getUi(); const cfg = cargarConfig_();
+  const resp = ui.prompt("🧪 Probar WhatsApp", "Número de destino (con lada, ej: 9671234567):", ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const tel = String(resp.getResponseText() || "").trim();
+  if (!tel) { ui.alert("Sin número."); return; }
+  if (!esSi_(cfg["WHATSAPP_ACTIVO"])) { ui.alert("WHATSAPP_ACTIVO está en NO", "Ponlo en SÍ para enviar de verdad.", ui.ButtonSet.OK); return; }
+  const vars = { NOMBRE: "Cliente de prueba", FECHA: formatearFechaAmable_(new Date()), HORA: "12:00", SERVICIO: "Corte" };
+  enviarWhatsAppTwilio_(tel, "CONFIRMACION_CITA", vars, cfg, "🧪 Prueba de BARBER OS Lite. Si lo recibes, Twilio quedó bien. ✂️");
+  ui.alert("Enviado (o intentado).", "Revisa la hoja LOG.", ui.ButtonSet.OK);
+}
+
+/************ EMAIL AL CLIENTE (GMAIL) ************/
+
+function enviarCorreoCliente_(email, mensajeTexto, tipo, config, vars) {
+  try {
+    const nombreBarberia = config["EMAIL_REMITENTE_NOMBRE"] || config["NOMBRE_BARBERIA"] || "Barber Studio";
+    const acento = config["COLOR_ACENTO"] || "#1A1A1A";
+    const tel = config["TELEFONO_BARBERIA"] || ""; const ig = config["INSTAGRAM_BARBERIA"] || "";
+    const logoUrl = String(config["LOGO_URL"] || "").trim();
+    const asuntos = {
+      CONFIRMACION_CITA: `✂️ Tu cita en ${nombreBarberia} quedó confirmada`,
+      RECORDATORIO_2_DIAS: `📅 Recordatorio — Tu cita es en 2 días`,
+      RECORDATORIO_DIA_CITA: `⏰ Hoy es tu cita en ${nombreBarberia}`,
+      AGRADECIMIENTO: `💈 Gracias por visitarnos`,
+      YA_TOCA_CORTE: `✂️ Ya te toca corte, ${vars.NOMBRE || ""}`.trim()
+    };
+    MailApp.sendEmail({ to: email, subject: asuntos[tipo] || `Mensaje de ${nombreBarberia}`, body: mensajeTexto,
+      htmlBody: construirEmailHTML_(tipo, vars, nombreBarberia, acento, tel, ig, logoUrl), name: nombreBarberia });
+    registrarLog_(tipo + "_EMAIL", email, mensajeTexto, "ENVIADO");
+  } catch (e) { registrarLog_("ERROR_EMAIL", email, mensajeTexto, e.message); }
+}
+
+function construirEmailHTML_(tipo, vars, nombreBarberia, acento, telefono, instagram, logoUrl) {
+  const cs = {
+    CONFIRMACION_CITA:     { icono:"✂️", titulo:"¡Tu cita está confirmada!", subtitulo:`Nos vemos el <strong>${vars.FECHA||""}</strong> a las <strong>${vars.HORA||""}</strong>.`, detalle: vars.SERVICIO?`Servicio: <strong>${vars.SERVICIO}</strong>`:"", nota:"Si necesitas reagendar, contáctanos." },
+    RECORDATORIO_2_DIAS:   { icono:"📅", titulo:"Tu cita es en 2 días", subtitulo:`Cita el <strong>${vars.FECHA||""}</strong> a las <strong>${vars.HORA||""}</strong>.`, detalle: vars.SERVICIO?`Servicio: <strong>${vars.SERVICIO}</strong>`:"", nota:"Si no puedes asistir, avísanos. ¡Te esperamos!" },
+    RECORDATORIO_DIA_CITA: { icono:"⏰", titulo:"Hoy es tu cita", subtitulo:`Te esperamos hoy a las <strong>${vars.HORA||""}</strong>.`, detalle: vars.SERVICIO?`Servicio: <strong>${vars.SERVICIO}</strong>`:"", nota:"Llega unos minutos antes. ¡Hasta pronto!" },
+    AGRADECIMIENTO:        { icono:"💈", titulo:"¡Gracias por visitarnos!", subtitulo:`Fue un placer atenderte${vars.SERVICIO?` en tu <strong>${vars.SERVICIO}</strong>`:"."}.`, detalle:"Esperamos que hayas disfrutado tu experiencia.", nota:"Tu próxima cita está a solo un mensaje de distancia." },
+    YA_TOCA_CORTE:         { icono:"✂️", titulo:"Ya te toca corte", subtitulo:"Han pasado algunos días desde tu última visita.", detalle:"¿Agendamos tu próxima cita?", nota:"Siempre es buen momento para lucir bien." }
+  };
+  const c = cs[tipo] || { icono:"✂️", titulo:`Mensaje de ${nombreBarberia}`, subtitulo:"", detalle:"", nota:"" };
+  const footer = [telefono?`📞 ${telefono}`:"", instagram?`📸 @${instagram}`:""].filter(Boolean).join("&nbsp;&nbsp;|&nbsp;&nbsp;");
+  const cabecera = logoUrl
+    ? `<img src="${logoUrl}" alt="${nombreBarberia}" style="max-height:80px;max-width:240px;margin:0 auto 4px;display:block;"/>`
+    : `<p style="margin:0 0 6px;font-size:36px;">${c.icono}</p><p style="margin:0;font-size:22px;font-weight:700;color:#111;letter-spacing:1px;">${nombreBarberia}</p>`;
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/></head><body style="margin:0;padding:0;background:#f4f4f5;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f5;padding:40px 16px;"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#fff;border-radius:14px;overflow:hidden;border:1px solid #e6e6e6;"><tr><td align="center" style="background:#fff;padding:34px 40px 24px;border-bottom:1px solid #ededed;">${cabecera}<p style="margin:8px 0 0;font-size:11px;color:${acento};letter-spacing:4px;text-transform:uppercase;">BARBER STUDIO</p></td></tr><tr><td style="padding:38px 40px 30px;"><p style="margin:0 0 8px;font-size:12px;color:#999;text-transform:uppercase;letter-spacing:2px;">Hola, ${vars.NOMBRE||"cliente"}</p><h1 style="margin:0 0 18px;font-size:26px;font-weight:700;color:#111;">${c.titulo}</h1><table width="48" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:22px;"><tr><td style="height:3px;background:${acento};border-radius:2px;"></td></tr></table><p style="margin:0 0 16px;font-size:16px;color:#444;line-height:1.7;">${c.subtitulo}</p>${c.detalle?`<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:20px 0;background:#f7f7f8;border-radius:10px;border-left:3px solid ${acento};"><tr><td style="padding:16px 20px;font-size:15px;color:#333;">${c.detalle}</td></tr></table>`:""}${c.nota?`<p style="margin:24px 0 0;font-size:14px;color:#888;border-top:1px solid #ededed;padding-top:20px;">${c.nota}</p>`:""}</td></tr><tr><td align="center" style="background:#fafafa;padding:24px 40px;border-top:1px solid #ededed;"><p style="margin:0 0 6px;font-size:14px;font-weight:700;color:#111;">${nombreBarberia}</p>${footer?`<p style="margin:4px 0;font-size:13px;color:#777;">${footer}</p>`:""}<p style="margin:12px 0 0;font-size:11px;color:#bbb;">Mensaje automático de BARBER OS Lite. No respondas a este correo.</p></td></tr></table></td></tr></table></body></html>`;
+}
+
+/************ PLANTILLAS / CACHÉ ************/
+
+function construirMensajeDesdeCache_(plantillas, tipo, variables, config) {
+  let msg = plantillas[tipo] || "";
+  const extra = Object.assign({}, variables);
+  if (config) { extra.BARBERIA = config["NOMBRE_BARBERIA"] || ""; extra.TELEFONO = config["TELEFONO_BARBERIA"] || ""; extra.IG = config["INSTAGRAM_BARBERIA"] || ""; }
+  Object.keys(extra).forEach(k => { msg = msg.split(`{{${k}}}`).join(extra[k] == null ? "" : extra[k]); });
+  return msg;
+}
+
+function cargarConfig_() {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.CONFIG);
+  if (!hoja) return {};
+  const data = hoja.getDataRange().getValues(); const m = {};
+  for (let i = 1; i < data.length; i++) { if (data[i][0]) m[String(data[i][0]).trim()] = data[i][1]; }
+  return m;
+}
+
+function cargarPlantillas_() {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.MENSAJES);
+  if (!hoja) return {};
+  const data = hoja.getDataRange().getValues(); const m = {};
+  for (let i = 1; i < data.length; i++) { if (data[i][0]) m[String(data[i][0]).trim()] = data[i][1]; }
+  return m;
+}
+
+/************ TRIGGERS ************/
+
+function crearTriggersBarberOS_() {
+  const gestionadas = ["procesarCitasPendientes","enviarRecordatorios","enviarAgradecimientosPendientes","enviarYaTocaCorte","enviarResumenDiarioBarbero"];
+  ScriptApp.getProjectTriggers().forEach(t => { if (gestionadas.indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger("enviarResumenDiarioBarbero").timeBased().everyDays(1).atHour(7).create();
+  ScriptApp.newTrigger("procesarCitasPendientes").timeBased().everyHours(1).create();
+  ScriptApp.newTrigger("enviarRecordatorios").timeBased().everyDays(1).atHour(9).create();
+  ScriptApp.newTrigger("enviarYaTocaCorte").timeBased().everyDays(1).atHour(10).create();
+  ScriptApp.newTrigger("enviarAgradecimientosPendientes").timeBased().everyMinutes(30).create();
+  Logger.log("[Triggers] Recreados.");
+}
+
+/************ LOG ************/
+
+function registrarLog_(tipo, destinatario, mensaje, resultado) {
+  try {
+    const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJAS.LOG);
+    if (!hoja) return;
+    hoja.appendRow([new Date(), tipo, String(destinatario), String(mensaje).substring(0, 500), String(resultado)]);
+  } catch (e) { Logger.log(`[ERROR] registrarLog_: ${e.message}`); }
+}
+
+function abrirLog() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet(); const h = ss.getSheetByName(HOJAS.LOG);
+  if (h) ss.setActiveSheet(h);
+}
+
+/************ UTILIDADES ************/
+
+function esSi_(v) { const s = String(v == null ? "" : v).trim().toUpperCase(); return s === "SÍ" || s === "SI" || s === "YES" || s === "TRUE" || s === "1"; }
+
+function esCitaCerrada_(estado) { const e = String(estado || "").trim().toUpperCase(); return e === "COMPLETADA" || e === "CANCELADA" || e === "REAGENDADA"; }
+
+function appendFila_(hoja, obj) {
+  const headers = hoja.getRange(1, 1, 1, hoja.getLastColumn()).getValues()[0];
+  const fila = headers.map(h => { const k = String(h).trim(); return (obj[k] !== undefined && obj[k] !== null) ? obj[k] : ""; });
+  hoja.appendRow(fila);
+}
+
+function escaparHtml_(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function getValor_(fila, headers, col) { const i = headers.indexOf(col); if (i === -1) return ""; const v = fila[i]; return v === undefined || v === null ? "" : v; }
+
+function setValor_(hoja, headers, row, col, valor) { const i = headers.indexOf(col); if (i === -1) return; hoja.getRange(row, i + 1).setValue(valor); }
+
+function crearId_(prefijo) { return `${prefijo}-${new Date().getTime()}-${Math.floor(Math.random() * 9999)}`; }
+
+function limpiarFecha_(fecha) {
+  if (!fecha) return null;
+  const str = String(fecha).trim();
+  const iso = str.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+  if (iso) { const f = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])); f.setHours(0,0,0,0); return isNaN(f.getTime()) ? null : f; }
+  const dmy = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (dmy) { const f = new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1])); f.setHours(0,0,0,0); return isNaN(f.getTime()) ? null : f; }
+  const f = new Date(fecha); if (isNaN(f.getTime())) return null; f.setHours(0,0,0,0); return f;
+}
+
+function formatearFecha_(fecha) {
+  if (!fecha) return "";
+  try { return Utilities.formatDate(new Date(fecha), Session.getScriptTimeZone(), "dd/MM/yyyy"); } catch (e) { return String(fecha); }
+}
+
+function formatearHora_(hora) {
+  if (!hora) return "";
+  if (hora instanceof Date) { try { return Utilities.formatDate(hora, Session.getScriptTimeZone(), "HH:mm"); } catch (e) { return String(hora); } }
+  return String(hora);
+}
+
+function formatearFechaAmable_(fecha) {
+  const f = limpiarFecha_(fecha);
+  if (!f) return String(fecha || "");
+  const dias = ["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
+  const meses = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+  return `${dias[f.getDay()]} ${f.getDate()} de ${meses[f.getMonth()]}`;
+}
+
+function formatearHoraAmable_(hora) {
+  if (!hora) return "";
+  let hh, mm;
+  if (hora instanceof Date) { hh = hora.getHours(); mm = hora.getMinutes(); }
+  else {
+    const s = String(hora).trim(); const t = new Date(`1970-01-01 ${s}`);
+    if (!isNaN(t.getTime())) { hh = t.getHours(); mm = t.getMinutes(); }
+    else { const p = s.replace(/[^\d:]/g, "").split(":"); hh = Number(p[0]) || 0; mm = Number(p[1]) || 0; }
+  }
+  let parte;
+  if (hh === 0) parte = "de la noche";
+  else if (hh >= 1 && hh <= 4) parte = "de la madrugada";
+  else if (hh >= 5 && hh <= 11) parte = "de la mañana";
+  else if (hh === 12) parte = "del mediodía";
+  else if (hh >= 13 && hh <= 18) parte = "de la tarde";
+  else parte = "de la noche";
+  let h12 = hh % 12; if (h12 === 0) h12 = 12;
+  const minStr = (mm === 0) ? "" : ":" + (mm < 10 ? "0" + mm : mm);
+  return `${h12}${minStr} ${parte}`;
+}
