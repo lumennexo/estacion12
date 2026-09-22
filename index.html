@@ -1,25 +1,69 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Estación 12 — Acceso BARBER OS</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0d3d2d">
+<title>Estación 12 — BARBER OS</title>
 <style>
-*{box-sizing:border-box}html,body{margin:0;min-height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
-body{background:radial-gradient(120% 90% at 50% 20%,#164733 0%,#0f3626 55%,#0a2b1e 100%);color:#fff}
-main{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:28px}.box{width:100%;max-width:380px;text-align:center}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;min-height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#f4f4f4}
+body.panel-open{overflow:hidden}
+#login{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:28px;background:radial-gradient(120% 90% at 50% 20%,#164733 0%,#0f3626 55%,#0a2b1e 100%);color:#fff}
+.box{width:100%;max-width:380px;text-align:center}
 .logo{width:112px;height:112px;border-radius:28px;margin:0 auto 22px;background:#0d3d2d;display:grid;place-items:center;font-size:52px;box-shadow:0 18px 45px #0004}
-h1{margin:0 0 8px;font-size:29px}p{color:#a9c2b4;margin:0 0 26px;line-height:1.5}
+h1{margin:0 0 8px;font-size:29px}
+p{color:#a9c2b4;margin:0 0 26px;line-height:1.5}
 input{width:100%;padding:16px;border-radius:12px;border:1px solid #ffffff29;background:#ffffff0d;color:#fff;text-align:center;font-size:17px}
-input:focus{outline:none;border-color:#31ad7d}button{width:100%;margin-top:13px;padding:16px;border:0;border-radius:12px;background:#209c6b;color:#fff;font-size:17px;font-weight:750;cursor:pointer}
-.err{display:none;color:#ffb5ae;margin-top:13px;font-size:14px}small{display:block;margin-top:25px;color:#789486}
-</style></head>
-<body><main><div class="box"><div class="logo">✂️</div><h1>BARBER OS</h1><p>Acceso exclusivo del barbero</p>
-<input id="pin" type="password" autocomplete="current-password" placeholder="Llave de acceso">
-<button id="go">Entrar al panel</button><div id="err" class="err">Escribe tu llave de acceso.</div>
-<small>Estación 12 · BARBER OS Lite</small></div></main>
+input:focus{outline:none;border-color:#31ad7d}
+button{width:100%;margin-top:13px;padding:16px;border:0;border-radius:12px;background:#209c6b;color:#fff;font-size:17px;font-weight:750;cursor:pointer}
+.err{display:none;color:#ffb5ae;margin-top:13px;font-size:14px}
+small{display:block;margin-top:25px;color:#789486}
+#app{display:none;width:100%;height:100dvh;background:#f4f4f4}
+#frame{display:block;width:100%;height:100%;border:0;background:#f4f4f4}
+</style>
+</head>
+<body>
+<section id="login">
+  <div class="box">
+    <div class="logo">✂️</div>
+    <h1>BARBER OS</h1>
+    <p>Acceso exclusivo del barbero</p>
+    <input id="pin" type="password" autocomplete="current-password" placeholder="Llave de acceso">
+    <button id="go">Entrar al panel</button>
+    <div id="err" class="err">Escribe tu llave de acceso.</div>
+    <small>Estación 12 · BARBER OS Lite</small>
+  </div>
+</section>
+
+<section id="app">
+  <iframe id="frame" title="BARBER OS" allow="clipboard-write"></iframe>
+</section>
+
 <script>
-const EXEC='https://script.google.com/macros/s/AKfycbxt1IRK69buYq6esbVmrqtCIzITdQy4YbjPiRfgvbdvB-eOmXxa9oNFhM9_aPxjTwHq/exec';
-const pin=document.getElementById('pin'),err=document.getElementById('err');
-function entrar(){const k=(pin.value||'').trim();if(!k){err.style.display='block';return}location.href=EXEC+'?page=panel&key='+encodeURIComponent(k)}
-document.getElementById('go').onclick=entrar;pin.addEventListener('keydown',e=>{if(e.key==='Enter')entrar()});pin.addEventListener('input',()=>err.style.display='none');
-</script></body></html>
+const EXEC = 'https://script.google.com/macros/s/AKfycbxt1IRK69buYq6esbVmrqtCIzITdQy4YbjPiRfgvbdvB-eOmXxa9oNFhM9_aPxjTwHq/exec';
+const pin = document.getElementById('pin');
+const err = document.getElementById('err');
+const login = document.getElementById('login');
+const app = document.getElementById('app');
+const frame = document.getElementById('frame');
+
+function entrar() {
+  const key = (pin.value || '').trim();
+  if (!key) {
+    err.style.display = 'block';
+    return;
+  }
+  err.style.display = 'none';
+  frame.src = EXEC + '?page=panel&key=' + encodeURIComponent(key);
+  login.style.display = 'none';
+  app.style.display = 'block';
+  document.body.classList.add('panel-open');
+}
+
+document.getElementById('go').addEventListener('click', entrar);
+pin.addEventListener('keydown', e => { if (e.key === 'Enter') entrar(); });
+pin.addEventListener('input', () => err.style.display = 'none');
+</script>
+</body>
+</html>
